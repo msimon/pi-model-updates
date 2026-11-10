@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CatalogModel } from "./families.ts";
-import { buildFindings, describe, groupReadOnly, noticeText, packageName, setManualTarget, statusText, summarize } from "./findings.ts";
+import { buildFindings, describe, groupReadOnly, normalizeGitUrl, noticeText, packageName, packageRepo, setManualTarget, statusText, summarize } from "./findings.ts";
 import { scanCron, scanSettings, scanSource, type Pin } from "./scan.ts";
 
 const CATALOG: CatalogModel[] = [
@@ -90,6 +90,21 @@ test("read-only package pins are listed but not counted", () => {
     ),
   );
   assert.deepEqual(grouped.map((g) => [g.name, g.findings.length]), [["o/r", 2]]);
+  // a local clone of the same repo (via extraPaths) hides the row
+  const pkg = scanSource({ file: "/u/.pi/agent/git/github.com/O/R/src/d.ts", label: "d.ts", text: 'a = "claude-haiku-4-5";' }, "package");
+  assert.deepEqual(groupReadOnly(buildFindings(pkg, CATALOG), new Set(["github.com/o/r"])), []);
+  assert.equal(groupReadOnly(buildFindings(pkg, CATALOG), new Set(["github.com/o/other"])).length, 1);
+  assert.equal(packageRepo("/u/.pi/agent/git/github.com/msimon/pi-subagents/src/x.ts"), "github.com/msimon/pi-subagents");
+  for (const url of [
+    "git@github.com:msimon/pi-subagents.git",
+    "https://github.com/msimon/pi-subagents",
+    "ssh://git@github.com/msimon/pi-subagents.git",
+    "git:github.com/msimon/pi-subagents",
+    "git+https://github.com/MSimon/pi-subagents.git/",
+  ]) {
+    assert.equal(normalizeGitUrl(url), "github.com/msimon/pi-subagents", url);
+  }
+  assert.equal(normalizeGitUrl("not a url"), undefined);
   const pins: Pin[] = scanSource({ file: "/git/d.ts", label: "d.ts", text: 'model: "anthropic/claude-haiku-4-5",' }, "package");
   const f = buildFindings(pins, CATALOG);
   assert.equal(f.length, 1);

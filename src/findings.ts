@@ -154,11 +154,37 @@ export function packageName(file: string): string {
   return m ? m[1]!.replace(/\\/g, "/") : file;
 }
 
-/** Read-only package findings, one group per package, for a single summary row each. */
-export function groupReadOnly(findings: readonly Finding[]): Array<{ name: string; findings: Finding[] }> {
+/** `host/owner/repo` of a managed git package checkout, lowercased, or undefined. */
+export function packageRepo(file: string): string | undefined {
+  const m = /[\\/]git[\\/]([^\\/]+[\\/][^\\/]+[\\/][^\\/]+)[\\/]/.exec(file);
+  return m ? m[1]!.replace(/\\/g, "/").toLowerCase() : undefined;
+}
+
+/**
+ * A git remote URL as `host/owner/repo`, lowercased: `git@github.com:o/r.git`,
+ * `https://github.com/o/r`, `ssh://git@github.com/o/r.git` and
+ * `git:github.com/o/r` all become `github.com/o/r`.
+ */
+export function normalizeGitUrl(url: string): string | undefined {
+  let u = url.trim().replace(/^git\+/, "").replace(/^git:(?!\/\/)/, "");
+  u = u.replace(/^[a-z]+:\/\//i, "").replace(/^[^@/]+@/, "");
+  u = u.replace(/^([^/:]+):(?!\d)/, "$1/").replace(/\/+$/, "").replace(/\.git$/, "");
+  const parts = u.split("/");
+  if (parts.length < 3 || parts.some((p) => !p)) return undefined;
+  return parts.slice(0, 3).join("/").toLowerCase();
+}
+
+/**
+ * Read-only package findings, one group per package, for a single summary row
+ * each. Packages whose repository is in `covered` (a local clone you scan as
+ * editable, e.g. via extraPaths) are left out: their pins already show there.
+ */
+export function groupReadOnly(findings: readonly Finding[], covered: ReadonlySet<string> = new Set()): Array<{ name: string; findings: Finding[] }> {
   const groups = new Map<string, Finding[]>();
   for (const f of findings) {
     if (f.pin.editable) continue;
+    const repo = packageRepo(f.pin.file);
+    if (repo && covered.has(repo)) continue;
     const name = packageName(f.pin.file);
     groups.set(name, [...(groups.get(name) ?? []), f]);
   }

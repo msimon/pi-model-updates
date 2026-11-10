@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { planFileEdits, writeFilePlan } from "./apply.ts";
 import { replacementChoices, type CatalogModel } from "./families.ts";
-import { buildFindings, describe, groupReadOnly, noticeText, setManualTarget, statusText, summarize, type Finding, type IgnoreEntry } from "./findings.ts";
+import { buildFindings, describe, groupReadOnly, normalizeGitUrl, noticeText, setManualTarget, statusText, summarize, type Finding, type IgnoreEntry } from "./findings.ts";
 import { collectPins, tildePath, type CollectResult } from "./scan.ts";
 import { loadState, localDay, saveState, type State } from "./state.ts";
 
@@ -63,6 +63,24 @@ function gitTopLevel(dir: string): Promise<string | undefined> {
   return new Promise((done) => {
     execFile("git", ["-C", dir, "rev-parse", "--show-toplevel"], { timeout: 5_000 }, (err, stdout) => done(err ? undefined : stdout.trim() || undefined));
   });
+}
+
+function gitOrigin(dir: string): Promise<string | undefined> {
+  return new Promise((done) => {
+    execFile("git", ["-C", dir, "remote", "get-url", "origin"], { timeout: 5_000 }, (err, stdout) => done(err ? undefined : stdout.trim() || undefined));
+  });
+}
+
+/** `host/owner/repo` of every extraPaths entry's git origin: packages you already scan as editable. */
+async function coveredRepos(extraPaths: readonly string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const p of extraPaths) {
+    const dir = p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p;
+    const url = await gitOrigin(dir);
+    const repo = url ? normalizeGitUrl(url) : undefined;
+    if (repo) out.add(repo);
+  }
+  return out;
 }
 
 export default function modelUpdates(pi: ExtensionAPI) {
@@ -158,7 +176,7 @@ export default function modelUpdates(pi: ExtensionAPI) {
     }
 
     const editable = findings.filter((f) => f.pin.editable);
-    const readOnly = groupReadOnly(findings);
+    const readOnly = groupReadOnly(findings, await coveredRepos(state.extraPaths ?? []));
     const selected = new Set(editable.filter((f) => !f.ignored && f.newText !== undefined));
 
     for (;;) {
