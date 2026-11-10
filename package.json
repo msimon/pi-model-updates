@@ -1,0 +1,53 @@
+{
+  "name": "@msimon/pi-model-updates",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Notice when a newer model in the same family is available and update every place your pi setup pins a model (settings.json, pi-cron-jobs, extension sources, agents, skills), with your approval.",
+  "author": "Marc Simon",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/msimon/pi-model-updates.git"
+  },
+  "homepage": "https://github.com/msimon/pi-model-updates#readme",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "models"
+  ],
+  "files": [
+    "src/**/*",
+    "!src/**/*.test.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.3"
+  }
+}
