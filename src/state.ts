@@ -4,11 +4,14 @@
 
 import { readFile, rename, writeFile } from "node:fs/promises";
 import type { IgnoreEntry, Summary } from "./findings.ts";
+import type { GitMode } from "./git.ts";
 
 export interface State {
   /** Extra files or folders to scan as editable, `~` allowed. Edited by hand. */
   extraPaths?: string[];
   ignored?: IgnoreEntry[];
+  /** After applying: commit and push edited files in git repos (default), only commit, or leave them. Edited by hand. */
+  git?: GitMode;
   /** Local date (YYYY-MM-DD) of the last check; the startup check runs once per day. */
   lastCheckDay?: string;
   lastCheckAt?: string;
@@ -30,6 +33,7 @@ function toState(raw: unknown): State {
       (i): i is IgnoreEntry => !!i && typeof i === "object" && typeof (i as IgnoreEntry).key === "string" && typeof (i as IgnoreEntry).target === "string",
     );
   }
+  if (r.git === "push" || r.git === "commit" || r.git === "off") s.git = r.git;
   if (typeof r.lastCheckDay === "string") s.lastCheckDay = r.lastCheckDay;
   if (typeof r.lastCheckAt === "string") s.lastCheckAt = r.lastCheckAt;
   const sum = r.summary as Partial<Summary> | undefined;

@@ -12,14 +12,26 @@
 // by exact replacement at the scanned offset, cron jobs via
 // `pi-cron-jobs set <id> --model <id>`.
 
-import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
+
+/** `file` relative to `repo`; git reports the repo by its real path (e.g. /private/tmp on macOS). */
+function inRepo(repo: string, file: string): string {
+  let real = file;
+  try {
+    real = realpathSync(file);
+  } catch {
+    // keep as given
+  }
+  return relative(repo, real);
+}
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { planFileEdits, writeFilePlan } from "./apply.ts";
+import { planFileEdits, writeFilePlan, type FilePlan } from "./apply.ts";
 import { replacementChoices, type CatalogModel } from "./families.ts";
-import { buildFindings, describe, groupReadOnly, normalizeGitUrl, noticeText, setManualTarget, statusText, summarize, type Finding, type IgnoreEntry } from "./findings.ts";
+import { buildFindings, describe, groupReadOnly, normalizeGitUrl, noticeText, packageRepo, setManualTarget, statusText, summarize, type Finding, type IgnoreEntry } from "./findings.ts";
+import { commitAndPush, commitMessage, isClean, originSlug, repoOf, type GitMode } from "./git.ts";
 import { collectPins, tildePath, type CollectResult } from "./scan.ts";
 import { loadState, localDay, saveState, type State } from "./state.ts";
 
@@ -59,28 +71,36 @@ function liveIgnores(ignored: readonly IgnoreEntry[], r: CollectResult): IgnoreE
   return ignored.filter((i) => keys.has(i.key));
 }
 
-function gitTopLevel(dir: string): Promise<string | undefined> {
-  return new Promise((done) => {
-    execFile("git", ["-C", dir, "rev-parse", "--show-toplevel"], { timeout: 5_000 }, (err, stdout) => done(err ? undefined : stdout.trim() || undefined));
-  });
-}
-
-function gitOrigin(dir: string): Promise<string | undefined> {
-  return new Promise((done) => {
-    execFile("git", ["-C", dir, "remote", "get-url", "origin"], { timeout: 5_000 }, (err, stdout) => done(err ? undefined : stdout.trim() || undefined));
-  });
-}
-
 /** `host/owner/repo` of every extraPaths entry's git origin: packages you already scan as editable. */
 async function coveredRepos(extraPaths: readonly string[]): Promise<Set<string>> {
   const out = new Set<string>();
   for (const p of extraPaths) {
     const dir = p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p;
-    const url = await gitOrigin(dir);
-    const repo = url ? normalizeGitUrl(url) : undefined;
+    const repo = await originSlug(dir, normalizeGitUrl);
     if (repo) out.add(repo);
   }
   return out;
+}
+
+interface RepoPlan {
+  repo: string;
+  /** Edited files with no other uncommitted changes: committed and pushed. */
+  files: string[];
+  /** Edited files that already had other changes: edited but left uncommitted. */
+  dirty: string[];
+}
+
+/** Which planned files live in a git repository, and which of them can be committed on their own. */
+async function planRepos(plans: readonly FilePlan[]): Promise<RepoPlan[]> {
+  const byRepo = new Map<string, RepoPlan>();
+  for (const p of plans) {
+    const repo = await repoOf(p.file);
+    if (!repo) continue;
+    const rp = byRepo.get(repo) ?? { repo, files: [], dirty: [] };
+    ((await isClean(repo, p.file)) ? rp.files : rp.dirty).push(p.file);
+    byRepo.set(repo, rp);
+  }
+  return [...byRepo.values()];
 }
 
 export default function modelUpdates(pi: ExtensionAPI) {
@@ -256,13 +276,21 @@ export default function modelUpdates(pi: ExtensionAPI) {
 
   /** Returns true when the command is finished (applied or nothing left to do). */
   async function applySelected(ctx: ExtensionCommandContext, chosen: Finding[], state: State): Promise<boolean> {
+    const gitMode: GitMode = state.git ?? "push";
     const cron = chosen.filter((f) => f.pin.kind === "cron");
     const files = chosen.filter((f) => f.pin.kind !== "cron");
     const { plans, errors } = await planFileEdits(files, label);
+    const repoPlans = gitMode === "off" ? [] : await planRepos(plans);
     const cronCmds = cron.map((f) => ({ f, args: ["set", f.pin.jobId!, "--model", f.newText!] }));
+    const verb = gitMode === "push" ? "commit and push" : "commit";
+    const gitLines = repoPlans.flatMap((rp) => [
+      ...(rp.files.length ? [`$ git ${verb} in ${label(rp.repo)}: ${rp.files.map((f) => inRepo(rp.repo, f)).join(", ")}`] : []),
+      ...rp.dirty.map((f) => `  ${label(f)} already has other uncommitted changes: edited but not committed`),
+    ]);
     const preview = [
       ...plans.map((p) => p.diff),
       ...(cronCmds.length ? [cronCmds.map((c) => `$ pi-cron-jobs ${c.args.join(" ")}`).join("\n")] : []),
+      ...(gitLines.length ? [gitLines.join("\n")] : []),
       ...(errors.length ? [`Skipped:\n${errors.map((e) => `  ${e}`).join("\n")}`] : []),
     ].join("\n\n");
     const count = plans.reduce((n, p) => n + p.findings.length, 0) + cronCmds.length;
@@ -274,14 +302,15 @@ export default function modelUpdates(pi: ExtensionAPI) {
     if (!ok) return false;
 
     const results: string[] = [];
-    const written: string[] = [];
+    const written = new Map<string, FilePlan>();
     let settingsChanged = false;
+    const changeOf = (f: Finding) => (f.newText && !f.remove ? `${f.pin.text} → ${f.newText}` : `removed ${f.pin.text}`);
     for (const plan of plans) {
       try {
         await writeFilePlan(plan);
-        written.push(plan.file);
+        written.set(plan.file, plan);
         if (plan.findings.some((f) => f.pin.kind === "settings")) settingsChanged = true;
-        results.push(`✓ ${plan.label} (${plan.findings.map((f) => f.newText && !f.remove ? `${f.pin.text} → ${f.newText}` : `removed ${f.pin.text}`).join(", ")})`);
+        results.push(`✓ ${plan.label} (${plan.findings.map(changeOf).join(", ")})`);
       } catch (err) {
         results.push(`✗ ${plan.label}: ${(err as Error).message}`);
       }
@@ -293,11 +322,29 @@ export default function modelUpdates(pi: ExtensionAPI) {
     }
     for (const e of errors) results.push(`✗ ${e}`);
 
-    // Repositories now holding uncommitted edits (settings.json etc. are usually not in one)
-    const repos = new Set<string>();
-    for (const file of written) {
-      const top = await gitTopLevel(dirname(file));
-      if (top) repos.add(label(top));
+    // Commit (and push) each repository's edited files on their own
+    const leftDirty: string[] = [];
+    const pushedRepos: string[] = [];
+    for (const rp of repoPlans) {
+      const files = rp.files.filter((f) => written.has(f));
+      leftDirty.push(...rp.dirty.filter((f) => written.has(f)).map(label));
+      if (!files.length) continue;
+      const changes = files.flatMap((f) => written.get(f)!.findings.map((x) => ({ file: f, change: changeOf(x) })));
+      const res = await commitAndPush(rp.repo, files, commitMessage(changes, (f) => inRepo(rp.repo, f)), gitMode);
+      results.push(`${res.ok ? "✓" : "✗"} git ${label(rp.repo)}: ${res.detail}`);
+      if (res.pushed) pushedRepos.push(rp.repo);
+    }
+
+    // A pushed repo that is the source of an installed git package needs `pi update`
+    const installed = new Set(chosen.map((f) => packageRepo(f.pin.file)).filter(Boolean));
+    for (const p of (await scan(state)).pins) {
+      const repo = packageRepo(p.file);
+      if (repo) installed.add(repo);
+    }
+    const needUpdate: string[] = [];
+    for (const repo of pushedRepos) {
+      const slug = await originSlug(repo, normalizeGitUrl);
+      if (slug && installed.has(slug)) needUpdate.push(slug.split("/").slice(1).join("/"));
     }
 
     // Refresh the cached counts and footer status
@@ -308,7 +355,8 @@ export default function modelUpdates(pi: ExtensionAPI) {
     setStatus(ctx, after.summary ? statusText(after.summary) : undefined);
 
     const lines = [...results];
-    if (repos.size) lines.push(`Uncommitted changes now in: ${[...repos].join(", ")}`);
+    if (leftDirty.length) lines.push(`Not committed (they already had other changes): ${leftDirty.join(", ")}`);
+    if (needUpdate.length) lines.push(`Run pi update to install the pushed ${needUpdate.join(", ")} package${needUpdate.length === 1 ? "" : "s"}.`);
     lines.push(
       settingsChanged
         ? "Run /reload now so pi picks up settings.json (and so a model chosen earlier with /model is not written back over it)."
